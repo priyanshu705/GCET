@@ -142,13 +142,14 @@ export const listenToMessages = (
     onData: (messages: ChatMessage[]) => void,
     onError?: (error: FirestoreError) => void
 ): Unsubscribe => {
+    // Query newest-first for stable limiting with server timestamps, then reverse for UI order.
     const messagesQuery = query(messagesRef(chatId), orderBy('createdAt', 'desc'), limit(200));
-    debugChat('listenToMessages mount', { chatId });
+    debugChat('messages listener attached', { chatId });
 
     const unsubscribe = onSnapshot(
         messagesQuery,
         (snapshot) => {
-            debugChat('listenToMessages snapshot', {
+            debugChat('messages snapshot received', {
                 chatId,
                 size: snapshot.size,
                 fromCache: snapshot.metadata.fromCache,
@@ -170,13 +171,13 @@ export const listenToMessages = (
             onData(mappedMessages.reverse());
         },
         (error) => {
-            debugChat('listenToMessages error', { chatId, code: error.code, message: error.message });
+            debugChat('messages listener error', { chatId, code: error.code, message: error.message });
             onError?.(error);
         }
     );
 
     return () => {
-        debugChat('listenToMessages unmount', { chatId });
+        debugChat('messages listener detached', { chatId });
         unsubscribe();
     };
 };
@@ -193,12 +194,12 @@ export const listenToUserChats = (
         limit(100)
     );
 
-    debugChat('listenToUserChats mount', { userId });
+    debugChat('chat-list listener attached', { userId });
 
     const unsubscribe = onSnapshot(
         chatsQuery,
         (snapshot) => {
-            debugChat('listenToUserChats snapshot', {
+            debugChat('chat-list snapshot received', {
                 userId,
                 size: snapshot.size,
                 fromCache: snapshot.metadata.fromCache,
@@ -220,13 +221,13 @@ export const listenToUserChats = (
             onData(chats);
         },
         (error) => {
-            debugChat('listenToUserChats error', { userId, code: error.code, message: error.message });
+            debugChat('chat-list listener error', { userId, code: error.code, message: error.message });
             onError?.(error);
         }
     );
 
     return () => {
-        debugChat('listenToUserChats unmount', { userId });
+        debugChat('chat-list listener detached', { userId });
         unsubscribe();
     };
 };

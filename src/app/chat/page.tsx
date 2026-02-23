@@ -59,7 +59,11 @@ export default function ChatListPage() {
 
     const presenceUnsubsRef = useRef<Record<string, () => void>>({});
 
-    const currentUserId = useMemo(() => firebaseUid ?? null, [firebaseUid]);
+    // Prefer Firebase UID for Firestore rules; fall back to session ID so listeners can still attach.
+    const currentUserId = useMemo(
+        () => firebaseUid ?? session?.user?.id ?? null,
+        [firebaseUid, session?.user?.id]
+    );
 
     useEffect(() => {
         const firebaseAuth = getFirebaseAuth();

@@ -56,7 +56,11 @@ export default function ChatPage() {
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const isTypingRef = useRef(false);
 
-    const currentUserId = useMemo(() => firebaseUid ?? null, [firebaseUid]);
+    // Prefer Firebase UID for Firestore rules; fall back to session ID so listeners can still attach.
+    const currentUserId = useMemo(
+        () => firebaseUid ?? session?.user?.id ?? null,
+        [firebaseUid, session?.user?.id]
+    );
 
     useEffect(() => {
         const firebaseAuth = getFirebaseAuth();
@@ -127,75 +131,40 @@ export default function ChatPage() {
     }, [status, chatId, router]);
 
     useEffect(() => {
-        if (!chatId || !currentUserId || !chatData?.recipient?.id) {
+        if (!chatId || !currentUserId) {
             return;
         }
 
-        let unsubscribeMessages: (() => void) | null = null;
-        let unsubscribeTyping: (() => void) | null = null;
-        let unsubscribePresence: (() => void) | null = null;
-        let stopHeartbeat: (() => void) | null = null;
+        if (process.env.NODE_ENV !== 'production') {
+            console.log('[chat-page] messages realtime setup start', { chatId, currentUserId });
+        }
 
-        const setupRealtime = async () => {
-            if (process.env.NODE_ENV !== 'production') {
-                console.log('[chat-page] setupRealtime start', {
-                    chatId,
-                    currentUserId,
-                    recipientId: chatData.recipient.id,
-                });
+        const unsubscribeMessages = listenToMessages(
+            chatId,
+            (nextMessages) => {
+                setMessages(nextMessages);
+            },
+            (error) => {
+                console.error('Messages listener error:', error);
             }
+        );
 
-            try {
-                await ensureChatDocument(chatId, [currentUserId, chatData.recipient.id]);
-            } catch (error) {
+        // Keep chat doc freshness in background; do not block listener attachment on this call.
+        if (chatData?.recipient?.id) {
+            void ensureChatDocument(chatId, [currentUserId, chatData.recipient.id]).catch((error) => {
                 console.error('Failed to ensure Firestore chat document:', error);
-            }
+            });
+        }
 
-            unsubscribeMessages = listenToMessages(
-                chatId,
-                (nextMessages) => {
-                    setMessages(nextMessages);
-                },
-                (error) => {
-                    console.error('Messages listener error:', error);
-                }
-            );
-
-            unsubscribeTyping = listenToTypingState(
-                chatId,
-                chatData.recipient.id,
-                (isTyping) => {
-                    setIsRecipientTyping(isTyping);
-                },
-                (error) => {
-                    console.error('Typing listener error:', error);
-                }
-            );
-
-            unsubscribePresence = listenToPresence(
-                chatData.recipient.id,
-                (isOnline) => {
-                    setRecipientOnline(isOnline);
-                },
-                (error) => {
-                    console.error('Presence listener error:', error);
-                }
-            );
-
-            stopHeartbeat = startPresenceHeartbeat(currentUserId);
-        };
-
-        void setupRealtime();
+        const stopHeartbeat = startPresenceHeartbeat(currentUserId);
 
         return () => {
             if (process.env.NODE_ENV !== 'production') {
-                console.log('[chat-page] setupRealtime cleanup', { chatId, currentUserId });
+                console.log('[chat-page] messages realtime setup cleanup', { chatId, currentUserId });
             }
 
-            unsubscribeMessages?.();
-            unsubscribeTyping?.();
-            unsubscribePresence?.();
-            stopHeartbeat?.();
+            unsubscribeMessages();
+            stopHeartbeat();
 
             if (typingTimeoutRef.current) {
                 clearTimeout(typingTimeoutRef.current);
@@ -209,6 +178,51 @@ export default function ChatPage() {
             }
         };
     }, [chatId, currentUserId, chatData?.recipient?.id]);
+
+    useEffect(() => {
+        if (!chatId || !chatData?.recipient?.id) {
+            return;
+        }
+
+        if (process.env.NODE_ENV !== 'production') {
+            console.log('[chat-page] typing/presence realtime setup start', {
+                chatId,
+                recipientId: chatData.recipient.id,
+            });
+        }
+
+        const unsubscribeTyping = listenToTypingState(
+            chatId,
+            chatData.recipient.id,
+            (isTyping) => {
+                setIsRecipientTyping(isTyping);
+            },
+            (error) => {
+                console.error('Typing listener error:', error);
+            }
+        );
+
+        const unsubscribePresence = listenToPresence(
+            chatData.recipient.id,
+            (isOnline) => {
+                setRecipientOnline(isOnline);
+            },
+            (error) => {
+                console.error('Presence listener error:', error);
+            }
+        );
+
+        return () => {
+            if (process.env.NODE_ENV !== 'production') {
+                console.log('[chat-page] typing/presence realtime setup cleanup', {
+                    chatId,
+                    recipientId: chatData.recipient.id,
+                });
+            }
+            unsubscribeTyping();
+            unsubscribePresence();
+        };
+    }, [chatId, chatData?.recipient?.id]);
 
     useEffect(() => {
         const refreshWindowState = () => {
