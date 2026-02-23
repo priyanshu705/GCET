@@ -59,19 +59,28 @@ export default function ChatListPage() {
 
     const presenceUnsubsRef = useRef<Record<string, () => void>>({});
 
-    const currentUserId = useMemo(
-        () => firebaseUid ?? session?.user?.id ?? null,
-        [firebaseUid, session?.user?.id]
-    );
+    const currentUserId = useMemo(() => firebaseUid ?? null, [firebaseUid]);
 
     useEffect(() => {
         const firebaseAuth = getFirebaseAuth();
         const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
             setFirebaseUid(user?.uid ?? null);
+            if (process.env.NODE_ENV !== 'production') {
+                console.log('[chat-list-page] firebase auth state', { uid: user?.uid ?? null });
+            }
         });
 
         return unsubscribe;
     }, []);
+
+    useEffect(() => {
+        if (process.env.NODE_ENV !== 'production' && firebaseUid && session?.user?.id && firebaseUid !== session.user.id) {
+            console.warn('[chat-list-page] Firebase UID and session user ID differ', {
+                firebaseUid,
+                sessionUserId: session.user.id,
+            });
+        }
+    }, [firebaseUid, session?.user?.id]);
 
     useEffect(() => {
         if (status === 'unauthenticated') {

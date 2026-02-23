@@ -7,7 +7,6 @@ import {
     doc,
     getDoc,
     limit,
-    limitToLast,
     onSnapshot,
     orderBy,
     query,
@@ -66,6 +65,17 @@ export interface ChatListItem {
     lastMessageSenderId: string | null;
     lastMessageCreatedAt: Date | null;
 }
+
+const CHAT_DEBUG = process.env.NODE_ENV !== 'production';
+
+const debugChat = (message: string, payload?: Record<string, unknown>) => {
+    if (!CHAT_DEBUG) return;
+    if (payload) {
+        console.log(`[firestore-chat] ${message}`, payload);
+        return;
+    }
+    console.log(`[firestore-chat] ${message}`);
+};
 
 const chatRef = (chatId: string) => doc(getFirebaseDb(), 'chats', chatId);
 const messagesRef = (chatId: string) => collection(getFirebaseDb(), 'chats', chatId, 'messages');
@@ -132,11 +142,19 @@ export const listenToMessages = (
     onData: (messages: ChatMessage[]) => void,
     onError?: (error: FirestoreError) => void
 ): Unsubscribe => {
-    const messagesQuery = query(messagesRef(chatId), orderBy('createdAt', 'asc'), limitToLast(200));
+    const messagesQuery = query(messagesRef(chatId), orderBy('createdAt', 'desc'), limit(200));
+    debugChat('listenToMessages mount', { chatId });
 
-    return onSnapshot(
+    const unsubscribe = onSnapshot(
         messagesQuery,
         (snapshot) => {
+            debugChat('listenToMessages snapshot', {
+                chatId,
+                size: snapshot.size,
+                fromCache: snapshot.metadata.fromCache,
+                hasPendingWrites: snapshot.metadata.hasPendingWrites,
+            });
+
             const mappedMessages: ChatMessage[] = snapshot.docs.map((messageDoc) => {
                 const data = messageDoc.data({ serverTimestamps: 'estimate' }) as FirestoreMessageDoc;
                 return {
@@ -149,10 +167,18 @@ export const listenToMessages = (
                 };
             });
 
-            onData(mappedMessages);
+            onData(mappedMessages.reverse());
         },
-        onError
+        (error) => {
+            debugChat('listenToMessages error', { chatId, code: error.code, message: error.message });
+            onError?.(error);
+        }
     );
+
+    return () => {
+        debugChat('listenToMessages unmount', { chatId });
+        unsubscribe();
+    };
 };
 
 export const listenToUserChats = (
@@ -167,9 +193,18 @@ export const listenToUserChats = (
         limit(100)
     );
 
-    return onSnapshot(
+    debugChat('listenToUserChats mount', { userId });
+
+    const unsubscribe = onSnapshot(
         chatsQuery,
         (snapshot) => {
+            debugChat('listenToUserChats snapshot', {
+                userId,
+                size: snapshot.size,
+                fromCache: snapshot.metadata.fromCache,
+                hasPendingWrites: snapshot.metadata.hasPendingWrites,
+            });
+
             const chats: ChatListItem[] = snapshot.docs.map((chatDoc) => {
                 const data = chatDoc.data({ serverTimestamps: 'estimate' }) as FirestoreChatDoc;
                 return {
@@ -184,8 +219,16 @@ export const listenToUserChats = (
 
             onData(chats);
         },
-        onError
+        (error) => {
+            debugChat('listenToUserChats error', { userId, code: error.code, message: error.message });
+            onError?.(error);
+        }
     );
+
+    return () => {
+        debugChat('listenToUserChats unmount', { userId });
+        unsubscribe();
+    };
 };
 
 export const acknowledgeMessages = async (

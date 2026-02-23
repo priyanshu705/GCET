@@ -56,19 +56,28 @@ export default function ChatPage() {
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const isTypingRef = useRef(false);
 
-    const currentUserId = useMemo(
-        () => firebaseUid ?? session?.user?.id ?? null,
-        [firebaseUid, session?.user?.id]
-    );
+    const currentUserId = useMemo(() => firebaseUid ?? null, [firebaseUid]);
 
     useEffect(() => {
         const firebaseAuth = getFirebaseAuth();
         const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
             setFirebaseUid(user?.uid ?? null);
+            if (process.env.NODE_ENV !== 'production') {
+                console.log('[chat-page] firebase auth state', { uid: user?.uid ?? null });
+            }
         });
 
         return unsubscribe;
     }, []);
+
+    useEffect(() => {
+        if (process.env.NODE_ENV !== 'production' && firebaseUid && session?.user?.id && firebaseUid !== session.user.id) {
+            console.warn('[chat-page] Firebase UID and session user ID differ', {
+                firebaseUid,
+                sessionUserId: session.user.id,
+            });
+        }
+    }, [firebaseUid, session?.user?.id]);
 
     useEffect(() => {
         if (status === 'unauthenticated') {
@@ -128,6 +137,14 @@ export default function ChatPage() {
         let stopHeartbeat: (() => void) | null = null;
 
         const setupRealtime = async () => {
+            if (process.env.NODE_ENV !== 'production') {
+                console.log('[chat-page] setupRealtime start', {
+                    chatId,
+                    currentUserId,
+                    recipientId: chatData.recipient.id,
+                });
+            }
+
             try {
                 await ensureChatDocument(chatId, [currentUserId, chatData.recipient.id]);
             } catch (error) {
@@ -171,6 +188,10 @@ export default function ChatPage() {
         void setupRealtime();
 
         return () => {
+            if (process.env.NODE_ENV !== 'production') {
+                console.log('[chat-page] setupRealtime cleanup', { chatId, currentUserId });
+            }
+
             unsubscribeMessages?.();
             unsubscribeTyping?.();
             unsubscribePresence?.();
