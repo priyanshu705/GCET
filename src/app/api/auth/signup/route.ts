@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { hashPassword, generateVerificationToken, isValidEmail, isValidPhone, validatePassword } from '@/lib/auth';
-import { verifyEmail, sendVerificationEmail, sendPhoneOTP } from '@/lib/verification';
+import { sendVerificationEmail } from '@/lib/verification';
 import { Campus, Gender } from '@/generated/prisma';
 
 export async function POST(request: NextRequest) {
