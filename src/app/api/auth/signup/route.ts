@@ -66,37 +66,57 @@ export async function POST(request: NextRequest) {
         const verificationToken = generateVerificationToken();
 
         // Create user
-        const user = await prisma.user.create({
-            data: {
-                email,
-                phone,
-                passwordHash,
-                campus: campus as Campus,
-                name,
-                age: parseInt(age),
-                gender: gender as Gender,
-                verificationToken,
-                seekingGender: [], // Will be set during profile setup
-                interests: [],
-                skills: [],
-                clubs: [],
-                studyInterests: [],
-                photos: [],
-            },
-        });
+        let user;
+        try {
+            user = await prisma.user.create({
+                data: {
+                    email,
+                    phone,
+                    passwordHash,
+                    campus: campus as Campus,
+                    name,
+                    age: parseInt(age),
+                    gender: gender as Gender,
+                    verificationToken,
+                    seekingGender: [],
+                    interests: [],
+                    skills: [],
+                    clubs: [],
+                    studyInterests: [],
+                    photos: [],
+                },
+            });
+        } catch (dbError: any) {
+            console.error('❌ Database user creation failed:', dbError);
+            return NextResponse.json(
+                { error: 'Database error: Could not create user. Schema might be out of sync.', details: dbError.message },
+                { status: 500 }
+            );
+        }
 
         // Send verification email
-        await sendVerificationEmail(email, verificationToken);
+        try {
+            await sendVerificationEmail(email, verificationToken);
+        } catch (emailError: any) {
+            console.error('❌ Email sending failed:', emailError);
+            // We still created the user, but verification email failed
+            return NextResponse.json({
+                message: 'User created, but failed to send verification email.',
+                token: verificationToken,
+                userId: user.id,
+                emailError: emailError.message
+            }, { status: 201 });
+        }
 
         return NextResponse.json({
             message: 'User created successfully. Please verify your email.',
             token: verificationToken,
             userId: user.id,
         });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Signup error:', error);
         return NextResponse.json(
-            { error: 'Failed to create account. Please try again.' },
+            { error: 'Failed to create account. Please try again.', details: error.message },
             { status: 500 }
         );
     }
