@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/nextauth';
 import prisma from '@/lib/prisma';
 
 // In production, you'd store OTPs in Redis or a database table
@@ -7,8 +9,29 @@ const otpStore = new Map<string, { otp: string; expiresAt: Date }>();
 
 export async function POST(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions);
+        if (!session?.user?.id) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
         const body = await request.json();
-        const { phone, otp } = body;
+        const { phone, otp, verified } = body;
+
+        // If frontend already verified with Firebase
+        if (verified === true && phone) {
+            await prisma.user.update({
+                where: { id: session.user.id },
+                data: {
+                    phone,
+                    isPhoneVerified: true,
+                },
+            });
+
+            return NextResponse.json(
+                { message: 'Phone verified successfully' },
+                { status: 200 }
+            );
+        }
 
         if (!phone || !otp) {
             return NextResponse.json(
@@ -17,7 +40,7 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        // Check OTP
+        // Check OTP (Fallback for non-Firebase flow)
         const storedOTP = otpStore.get(phone);
         if (!storedOTP) {
             return NextResponse.json(
@@ -41,21 +64,10 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        // Find user and mark phone as verified
-        const user = await prisma.user.findUnique({
-            where: { phone },
-        });
-
-        if (!user) {
-            return NextResponse.json(
-                { error: 'User not found' },
-                { status: 404 }
-            );
-        }
-
         await prisma.user.update({
-            where: { id: user.id },
+            where: { id: session.user.id },
             data: {
+                phone,
                 isPhoneVerified: true,
             },
         });

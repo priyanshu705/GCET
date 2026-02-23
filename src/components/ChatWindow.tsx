@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import ChatBubble from './ChatBubble';
+import ReportModal from './ReportModal';
 
 interface Message {
     id: string;
@@ -39,7 +40,30 @@ export default function ChatWindow({
 }: ChatWindowProps) {
     const [inputMessage, setInputMessage] = useState('');
     const [showEmojiHint, setShowEmojiHint] = useState(false);
+    const [showMenu, setShowMenu] = useState(false);
+    const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+    const [isBlocking, setIsBlocking] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    const handleBlock = async () => {
+        if (!confirm('Are you sure you want to block this user? You will no longer be able to message each other.')) return;
+
+        try {
+            setIsBlocking(true);
+            const response = await fetch('/api/block', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ blockedUserId: chatId.split('-').find(id => id !== currentUserId) || '' }), // Assuming chatId contains IDs or we have recipientId
+            });
+            if (response.ok) {
+                window.location.href = '/chat';
+            }
+        } catch (error) {
+            console.error('Blocking failed:', error);
+        } finally {
+            setIsBlocking(false);
+        }
+    };
 
     const displayName = isAnonymous
         ? `Stranger #${chatId.slice(-4).toUpperCase()}`
@@ -103,13 +127,50 @@ export default function ChatWindow({
                                 🔓 Request Reveal
                             </button>
                         )}
-                        <button className="p-2 text-gray-400 hover:text-white transition-colors">
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-                            </svg>
-                        </button>
+                        <div className="relative">
+                            <button
+                                onClick={() => setShowMenu(!showMenu)}
+                                className="p-2 text-gray-400 hover:text-white transition-colors"
+                            >
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+                                </svg>
+                            </button>
+
+                            {showMenu && (
+                                <div className="absolute right-0 mt-2 w-48 glass rounded-2xl shadow-xl py-2 z-50 animate-in slide-in-from-top-2">
+                                    <button
+                                        onClick={() => {
+                                            setShowMenu(false);
+                                            setIsReportModalOpen(true);
+                                        }}
+                                        className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-white/5 hover:text-white"
+                                    >
+                                        🚩 Report User
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowMenu(false);
+                                            handleBlock();
+                                        }}
+                                        disabled={isBlocking}
+                                        className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                                    >
+                                        🚫 {isBlocking ? 'Blocking...' : 'Block User'}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
+
+                <ReportModal
+                    isOpen={isReportModalOpen}
+                    onClose={() => setIsReportModalOpen(false)}
+                    reportedUserId={chatId.split('-').find(id => id !== currentUserId) || ''}
+                    chatId={chatId}
+                    userName={displayName}
+                />
 
                 {/* Reveal Progress */}
                 {isAnonymous && (
@@ -196,8 +257,8 @@ export default function ChatWindow({
                         onClick={handleSend}
                         disabled={!inputMessage.trim()}
                         className={`p-3 rounded-full transition-all ${inputMessage.trim()
-                                ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white hover-glow'
-                                : 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                            ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white hover-glow'
+                            : 'bg-gray-700 text-gray-500 cursor-not-allowed'
                             }`}
                     >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

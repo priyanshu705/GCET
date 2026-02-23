@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { getSocket } from '@/lib/socket-client';
 
 interface Message {
     id: string;
@@ -44,8 +45,41 @@ export default function ChatPage() {
     const [newMessage, setNewMessage] = useState('');
     const [sending, setSending] = useState(false);
     const [revealing, setRevealing] = useState(false);
+    const [isRecipientTyping, setIsRecipientTyping] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Socket connection
+    useEffect(() => {
+        if (status === 'authenticated' && chatId && session?.user?.id) {
+            const socket = getSocket();
+            socket.connect();
+
+            socket.emit('join_room', chatId);
+
+            socket.on('new_message', (msg: Message) => {
+                setMessages(prev => {
+                    if (prev.find(m => m.id === msg.id)) return prev;
+                    return [...prev, msg];
+                });
+            });
+
+            socket.on('user_typing', (data: { userId: string, isTyping: boolean }) => {
+                if (data.userId !== session.user.id) {
+                    setIsRecipientTyping(data.isTyping);
+                }
+            });
+
+            return () => {
+                socket.off('new_message');
+                socket.off('user_typing');
+                socket.emit('leave_room', chatId);
+                // We don't disconnect globally here to keep the socket alive for other pages if needed
+                // socket.disconnect(); 
+            };
+        }
+    }, [status, chatId, session]);
 
     useEffect(() => {
         if (status === 'unauthenticated') {
@@ -85,27 +119,43 @@ export default function ChatPage() {
         }
     };
 
+    const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setNewMessage(e.target.value);
+
+        const socket = getSocket();
+        socket.emit('typing', { roomId: chatId, userId: session?.user?.id, isTyping: true });
+
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+
+        typingTimeoutRef.current = setTimeout(() => {
+            socket.emit('typing', { roomId: chatId, userId: session?.user?.id, isTyping: false });
+        }, 2000);
+    };
+
     const sendMessage = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newMessage.trim() || sending) return;
 
-        setSending(true);
+        const socket = getSocket();
+        const content = newMessage.trim();
+        setNewMessage('');
+
+        socket.emit('send_message', {
+            roomId: chatId,
+            content,
+            senderId: session?.user?.id,
+            senderName: session?.user?.name,
+            isAnonymous: chatData?.isAnonymous
+        });
+
         try {
-            const res = await fetch(`/api/chat/${chatId}/send`, {
+            await fetch(`/api/chat/${chatId}/send`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: newMessage.trim() }),
+                body: JSON.stringify({ content }),
             });
-
-            if (res.ok) {
-                const data = await res.json();
-                setMessages([...messages, data.message]);
-                setNewMessage('');
-            }
         } catch (error) {
-            console.error('Failed to send message:', error);
-        } finally {
-            setSending(false);
+            console.error('Failed to persist message:', error);
         }
     };
 
@@ -162,27 +212,26 @@ export default function ChatPage() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900/20 to-gray-900 flex flex-col">
-            {/* Header */}
             <header className="glass border-b border-white/10 p-4 sticky top-0 z-10">
                 <div className="max-w-2xl mx-auto flex items-center gap-3">
                     <Link href="/chat" className="p-2 glass rounded-full hover:bg-white/10">
                         ←
                     </Link>
-
                     <div className="relative">
                         <div className="w-10 h-10 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 flex items-center justify-center">
                             {chatData.recipient.photo ? (
                                 <img src={chatData.recipient.photo} alt="" className="w-full h-full rounded-full object-cover" />
-                            ) : chatData.isAnonymous ? '🎭' : chatData.recipient.name?.charAt(0)}
+                            ) : chatData.isAnonymous ? '🎭' : chatData.recipient.name?.charAt(0).toUpperCase()}
                         </div>
                         {chatData.recipient.isOnline && (
                             <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-gray-900 rounded-full" />
                         )}
                     </div>
-
                     <div className="flex-1">
                         <div className="flex items-center gap-2">
-                            <h1 className="font-semibold text-white">{chatData.recipient.name}</h1>
+                            <h1 className="font-semibold text-white">
+                                {chatData.isAnonymous ? `Stranger #${chatId.split('-').find(id => id !== session?.user?.id)?.slice(-4).toUpperCase()}` : chatData.recipient.name}
+                            </h1>
                             {chatData.recipient.isVerified && <span className="text-blue-400 text-sm">✓</span>}
                         </div>
                         <p className="text-xs text-gray-400">
@@ -190,7 +239,6 @@ export default function ChatPage() {
                             {chatData.isAnonymous && ` • Reveal Level ${chatData.revealLevel}/5`}
                         </p>
                     </div>
-
                     {chatData.isAnonymous && (
                         <button
                             onClick={requestReveal}
@@ -203,9 +251,7 @@ export default function ChatPage() {
                 </div>
             </header>
 
-            {/* Messages */}
             <main className="flex-1 overflow-y-auto p-4 max-w-2xl mx-auto w-full">
-                {/* Reveal Progress */}
                 {chatData.isAnonymous && (
                     <div className="glass rounded-xl p-3 mb-4 text-center">
                         <p className="text-xs text-gray-400 mb-2">Reveal Progress</p>
@@ -221,15 +267,14 @@ export default function ChatPage() {
                     </div>
                 )}
 
-                {/* Message List */}
                 <div className="space-y-3">
                     {messages.map((msg) => {
                         const isOwn = msg.senderId === session?.user?.id;
                         return (
                             <div key={msg.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
                                 <div className={`max-w-[75%] ${isOwn
-                                        ? 'bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl rounded-br-md'
-                                        : 'glass rounded-2xl rounded-bl-md'
+                                    ? 'bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl rounded-br-md'
+                                    : 'glass rounded-2xl rounded-bl-md'
                                     } px-4 py-2`}>
                                     <p className="text-white">{msg.content}</p>
                                     <div className={`flex items-center gap-1 mt-1 ${isOwn ? 'justify-end' : ''}`}>
@@ -244,20 +289,31 @@ export default function ChatPage() {
                 </div>
             </main>
 
-            {/* Input */}
             <footer className="glass border-t border-white/10 p-4 sticky bottom-0">
+                {isRecipientTyping && (
+                    <div className="flex gap-1 items-center mb-2 px-2 animate-in fade-in slide-in-from-bottom-1">
+                        <div className="flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce"></span>
+                            <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+                            <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+                        </div>
+                        <span className="text-xs text-gray-500">
+                            {chatData.isAnonymous ? 'Stranger' : chatData.recipient.name} is typing...
+                        </span>
+                    </div>
+                )}
                 <form onSubmit={sendMessage} className="max-w-2xl mx-auto flex gap-3">
                     <input
                         type="text"
                         placeholder="Type a message..."
                         value={newMessage}
-                        onChange={(e) => setNewMessage(e.target.value)}
-                        className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-full text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                        onChange={handleTyping}
+                        className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-full text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 transition-all font-medium"
                     />
                     <button
                         type="submit"
                         disabled={!newMessage.trim() || sending}
-                        className="px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-full font-medium hover:opacity-90 disabled:opacity-50"
+                        className="px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-full font-bold text-white hover:opacity-90 disabled:opacity-50 transition-all shadow-lg active:scale-95"
                     >
                         {sending ? '...' : '➤'}
                     </button>

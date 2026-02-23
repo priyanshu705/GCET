@@ -1,4 +1,5 @@
-'use client';
+import { useState } from 'react';
+import ReportModal from './ReportModal';
 
 interface ProfileCardProps {
     id: string;
@@ -48,6 +49,8 @@ export default function ProfileCard({
     onMessage,
     compact = false,
 }: ProfileCardProps) {
+    const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+
     // Determine what to show based on reveal level
     const showName = !isAnonymous && revealLevel >= 3;
     const showBio = !isAnonymous && revealLevel >= 2;
@@ -139,13 +142,32 @@ export default function ProfileCard({
                             {showName && department && ` • ${department}`}
                         </p>
                     </div>
-                    <div className={`px-3 py-1 rounded-full text-xs font-medium ${mode === 'dating'
+                    <div className="flex flex-col items-end gap-2">
+                        <div className={`px-3 py-1 rounded-full text-xs font-medium ${mode === 'dating'
                             ? 'bg-pink-500/20 text-pink-400'
                             : 'bg-cyan-500/20 text-cyan-400'
-                        }`}>
-                        {mode === 'dating' ? '💕 Dating' : '🤝 Friend'}
+                            }`}>
+                            {mode === 'dating' ? '💕 Dating' : '🤝 Friend'}
+                        </div>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setIsReportModalOpen(true);
+                            }}
+                            className="p-1 text-gray-500 hover:text-red-400 transition-colors"
+                            title="Report User"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9" /></svg>
+                        </button>
                     </div>
                 </div>
+
+                <ReportModal
+                    isOpen={isReportModalOpen}
+                    onClose={() => setIsReportModalOpen(false)}
+                    reportedUserId={id}
+                    userName={displayName}
+                />
 
                 {/* Bio */}
                 {showBio && bio && (
