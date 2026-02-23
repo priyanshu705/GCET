@@ -1,7 +1,10 @@
-import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import { getAuth, Auth } from 'firebase/auth';
+'use client';
 
-const firebaseConfig = {
+import { FirebaseApp, FirebaseOptions, getApp, getApps, initializeApp } from 'firebase/app';
+import { Auth, getAuth } from 'firebase/auth';
+import { Firestore, getFirestore } from 'firebase/firestore';
+
+const firebaseConfig: FirebaseOptions = {
     apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
     authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
     projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
@@ -10,14 +13,40 @@ const firebaseConfig = {
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-// Initialize Firebase (client-side)
-let app: FirebaseApp;
-let auth: Auth;
+let cachedApp: FirebaseApp | null = null;
+let cachedAuth: Auth | null = null;
+let cachedDb: Firestore | null = null;
 
-if (typeof window !== 'undefined') {
-    app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-    auth = getAuth(app);
-}
+const ensureClientRuntime = () => {
+    if (typeof window === 'undefined') {
+        throw new Error('Firebase client SDK can only run in the browser.');
+    }
+};
 
-export { app, auth };
+export const getFirebaseApp = (): FirebaseApp => {
+    ensureClientRuntime();
+    if (!cachedApp) {
+        cachedApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    }
+    return cachedApp;
+};
+
+export const getFirebaseAuth = (): Auth => {
+    if (!cachedAuth) {
+        cachedAuth = getAuth(getFirebaseApp());
+    }
+    return cachedAuth;
+};
+
+export const getFirebaseDb = (): Firestore => {
+    if (!cachedDb) {
+        cachedDb = getFirestore(getFirebaseApp());
+    }
+    return cachedDb;
+};
+
+export const app = typeof window !== 'undefined' ? getFirebaseApp() : null;
+export const auth = typeof window !== 'undefined' ? getFirebaseAuth() : null;
+export const db = typeof window !== 'undefined' ? getFirebaseDb() : null;
+
 export default firebaseConfig;

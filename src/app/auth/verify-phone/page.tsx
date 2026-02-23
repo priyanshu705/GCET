@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useRef, KeyboardEvent, ClipboardEvent, useEffect } from 'react';
+import { useState, useRef, KeyboardEvent, ClipboardEvent, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import Link from 'next/link';
-import { auth } from '@/lib/firebase';
+import { getFirebaseAuth } from '@/lib/firebase';
 import { RecaptchaVerifier, signInWithPhoneNumber, ConfirmationResult } from 'firebase/auth';
 
 declare global {
@@ -16,6 +16,7 @@ declare global {
 
 export default function VerifyPhonePage() {
     const router = useRouter();
+    const firebaseAuth = useMemo(() => getFirebaseAuth(), []);
     const { data: session, update: updateSession } = useSession();
     const [phoneNumber, setPhoneNumber] = useState('');
     const [otp, setOtp] = useState(['', '', '', '', '', '']);
@@ -29,9 +30,9 @@ export default function VerifyPhonePage() {
 
     // Initialize reCAPTCHA when component mounts
     useEffect(() => {
-        if (typeof window !== 'undefined' && auth && !window.recaptchaVerifier) {
+        if (typeof window !== 'undefined' && !window.recaptchaVerifier) {
             try {
-                window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+                window.recaptchaVerifier = new RecaptchaVerifier(firebaseAuth, 'recaptcha-container', {
                     size: 'invisible',
                     callback: () => {
                         console.log('reCAPTCHA verified');
@@ -44,7 +45,7 @@ export default function VerifyPhonePage() {
                 console.error('reCAPTCHA initialization error:', err);
             }
         }
-    }, []);
+    }, [firebaseAuth]);
 
     const handleOtpChange = (index: number, value: string) => {
         if (value.length > 1) {
@@ -125,7 +126,7 @@ export default function VerifyPhonePage() {
             }
 
             const confirmationResult = await signInWithPhoneNumber(
-                auth,
+                firebaseAuth,
                 formattedPhone,
                 window.recaptchaVerifier
             );
@@ -153,7 +154,7 @@ export default function VerifyPhonePage() {
             // Reset reCAPTCHA on error
             if (window.recaptchaVerifier) {
                 window.recaptchaVerifier.clear();
-                window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+                window.recaptchaVerifier = new RecaptchaVerifier(firebaseAuth, 'recaptcha-container', {
                     size: 'invisible',
                 });
             }

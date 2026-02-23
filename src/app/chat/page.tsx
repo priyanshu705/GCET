@@ -1,11 +1,19 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import { onAuthStateChanged } from 'firebase/auth';
 import Navbar from '@/components/Navbar';
 import BottomNav from '@/components/BottomNav';
 import Link from 'next/link';
+import { getFirebaseAuth } from '@/lib/firebase';
+import {
+    listenToPresence,
+    listenToUserChats,
+    startPresenceHeartbeat,
+    type ChatListItem,
+} from '@/lib/firestore-chat';
 
 interface Conversation {
     id: string;
@@ -28,13 +36,42 @@ interface Conversation {
     updatedAt: string;
 }
 
+interface ChatsApiResponse {
+    chats?: Conversation[];
+}
+
+const parseMs = (value: string | Date | null | undefined): number => {
+    if (!value) return 0;
+    const ms = typeof value === 'string' ? new Date(value).getTime() : value.getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+};
+
 export default function ChatListPage() {
     const { data: session, status } = useSession();
     const router = useRouter();
 
-    const [chats, setChats] = useState<Conversation[]>([]);
+    const [baseChatsById, setBaseChatsById] = useState<Record<string, Conversation>>({});
+    const [firestoreChats, setFirestoreChats] = useState<ChatListItem[]>([]);
+    const [presenceByUserId, setPresenceByUserId] = useState<Record<string, boolean>>({});
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState<'all' | 'dating' | 'friends'>('all');
+    const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
+
+    const presenceUnsubsRef = useRef<Record<string, () => void>>({});
+
+    const currentUserId = useMemo(
+        () => firebaseUid ?? session?.user?.id ?? null,
+        [firebaseUid, session?.user?.id]
+    );
+
+    useEffect(() => {
+        const firebaseAuth = getFirebaseAuth();
+        const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
+            setFirebaseUid(user?.uid ?? null);
+        });
+
+        return unsubscribe;
+    }, []);
 
     useEffect(() => {
         if (status === 'unauthenticated') {
@@ -43,27 +80,156 @@ export default function ChatListPage() {
     }, [status, router]);
 
     useEffect(() => {
-        if (status === 'authenticated') {
-            fetchChats();
-        }
+        if (status !== 'authenticated') return;
+
+        let cancelled = false;
+
+        const fetchBaseChats = async () => {
+            try {
+                setLoading(true);
+                const res = await fetch('/api/chat');
+                if (!res.ok) return;
+
+                const data = (await res.json()) as ChatsApiResponse;
+                if (cancelled) return;
+
+                const nextMap: Record<string, Conversation> = {};
+                for (const chat of data.chats ?? []) {
+                    nextMap[chat.id] = chat;
+                }
+                setBaseChatsById(nextMap);
+            } catch (error) {
+                console.error('Failed to fetch chats:', error);
+            } finally {
+                if (!cancelled) {
+                    setLoading(false);
+                }
+            }
+        };
+
+        void fetchBaseChats();
+
+        return () => {
+            cancelled = true;
+        };
     }, [status]);
 
-    const fetchChats = async () => {
-        try {
-            setLoading(true);
-            const res = await fetch('/api/chat');
-            if (res.ok) {
-                const data = await res.json();
-                setChats(data.chats || []);
-            }
-        } catch (error) {
-            console.error('Failed to fetch chats:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
+    useEffect(() => {
+        if (!currentUserId) return;
 
-    const filteredChats = chats.filter(chat => {
+        const unsubscribe = listenToUserChats(
+            currentUserId,
+            (nextChats) => {
+                setFirestoreChats(nextChats);
+            },
+            (error) => {
+                console.error('Chat list listener error:', error);
+            }
+        );
+
+        return unsubscribe;
+    }, [currentUserId]);
+
+    useEffect(() => {
+        if (!currentUserId) return;
+        return startPresenceHeartbeat(currentUserId);
+    }, [currentUserId]);
+
+    const chats = useMemo(() => {
+        const merged = new Map<string, Conversation>();
+
+        for (const baseChat of Object.values(baseChatsById)) {
+            const recipientPresence = presenceByUserId[baseChat.recipient.id];
+            merged.set(baseChat.id, {
+                ...baseChat,
+                recipient: {
+                    ...baseChat.recipient,
+                    isOnline: recipientPresence ?? baseChat.recipient.isOnline,
+                },
+            });
+        }
+
+        for (const firestoreChat of firestoreChats) {
+            const existing = merged.get(firestoreChat.id);
+            const recipientId =
+                existing?.recipient.id ??
+                firestoreChat.participants.find((participantId) => participantId !== currentUserId) ??
+                '';
+            const recipientPresence = recipientId ? presenceByUserId[recipientId] : undefined;
+            const fallbackName = recipientId ? `User #${recipientId.slice(-4).toUpperCase()}` : 'Unknown user';
+
+            const mergedChat: Conversation = {
+                id: firestoreChat.id,
+                isAnonymous: existing?.isAnonymous ?? false,
+                revealLevel: existing?.revealLevel ?? 0,
+                mode: existing?.mode ?? 'FRIEND',
+                recipient: {
+                    id: recipientId,
+                    name: existing?.recipient.name ?? fallbackName,
+                    photo: existing?.recipient.photo ?? null,
+                    isOnline: recipientPresence ?? existing?.recipient.isOnline ?? false,
+                    isVerified: existing?.recipient.isVerified ?? false,
+                },
+                lastMessage:
+                    firestoreChat.lastMessageText && firestoreChat.lastMessageCreatedAt
+                        ? {
+                              content: firestoreChat.lastMessageText,
+                              time: firestoreChat.lastMessageCreatedAt.toISOString(),
+                              isOwn: firestoreChat.lastMessageSenderId === currentUserId,
+                          }
+                        : (existing?.lastMessage ?? null),
+                unreadCount: existing?.unreadCount ?? 0,
+                updatedAt: (
+                    firestoreChat.updatedAt ??
+                    (existing?.updatedAt ? new Date(existing.updatedAt) : new Date())
+                ).toISOString(),
+            };
+
+            merged.set(firestoreChat.id, mergedChat);
+        }
+
+        return [...merged.values()].sort((a, b) => parseMs(b.updatedAt) - parseMs(a.updatedAt));
+    }, [baseChatsById, firestoreChats, presenceByUserId, currentUserId]);
+
+    useEffect(() => {
+        const targetRecipientIds = new Set(
+            chats.map((chat) => chat.recipient.id).filter((recipientId) => Boolean(recipientId))
+        );
+
+        for (const [recipientId, unsubscribe] of Object.entries(presenceUnsubsRef.current)) {
+            if (targetRecipientIds.has(recipientId)) continue;
+            unsubscribe();
+            delete presenceUnsubsRef.current[recipientId];
+        }
+
+        for (const recipientId of targetRecipientIds) {
+            if (presenceUnsubsRef.current[recipientId]) continue;
+
+            presenceUnsubsRef.current[recipientId] = listenToPresence(
+                recipientId,
+                (isOnline) => {
+                    setPresenceByUserId((prev) => {
+                        if (prev[recipientId] === isOnline) return prev;
+                        return { ...prev, [recipientId]: isOnline };
+                    });
+                },
+                (error) => {
+                    console.error(`Presence listener error for ${recipientId}:`, error);
+                }
+            );
+        }
+    }, [chats]);
+
+    useEffect(() => {
+        return () => {
+            for (const unsubscribe of Object.values(presenceUnsubsRef.current)) {
+                unsubscribe();
+            }
+            presenceUnsubsRef.current = {};
+        };
+    }, []);
+
+    const filteredChats = chats.filter((chat) => {
         if (filter === 'dating') return chat.mode === 'DATING';
         if (filter === 'friends') return chat.mode === 'FRIEND';
         return true;
@@ -109,12 +275,15 @@ export default function ChatListPage() {
                         <button
                             key={f}
                             onClick={() => setFilter(f)}
-                            className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${filter === f
-                                    ? f === 'dating' ? 'bg-pink-600/30 text-pink-300' :
-                                        f === 'friends' ? 'bg-cyan-600/30 text-cyan-300' :
-                                            'bg-purple-600/30 text-purple-300'
+                            className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                                filter === f
+                                    ? f === 'dating'
+                                        ? 'bg-pink-600/30 text-pink-300'
+                                        : f === 'friends'
+                                          ? 'bg-cyan-600/30 text-cyan-300'
+                                          : 'bg-purple-600/30 text-purple-300'
                                     : 'glass text-gray-400 hover:text-white'
-                                }`}
+                            }`}
                         >
                             {f === 'all' && '✨ All'}
                             {f === 'dating' && '💕 Dating'}
@@ -132,13 +301,24 @@ export default function ChatListPage() {
                                     <div className="flex items-center gap-3">
                                         {/* Avatar */}
                                         <div className="relative">
-                                            <div className={`w-14 h-14 rounded-full flex items-center justify-center text-2xl ${chat.mode === 'DATING'
-                                                    ? 'bg-gradient-to-r from-purple-500 to-pink-500'
-                                                    : 'bg-gradient-to-r from-cyan-500 to-blue-500'
-                                                }`}>
+                                            <div
+                                                className={`w-14 h-14 rounded-full flex items-center justify-center text-2xl ${
+                                                    chat.mode === 'DATING'
+                                                        ? 'bg-gradient-to-r from-purple-500 to-pink-500'
+                                                        : 'bg-gradient-to-r from-cyan-500 to-blue-500'
+                                                }`}
+                                            >
                                                 {chat.recipient.photo ? (
-                                                    <img src={chat.recipient.photo} alt="" className="w-full h-full rounded-full object-cover" />
-                                                ) : chat.isAnonymous ? '🎭' : chat.recipient.name?.charAt(0) || '?'}
+                                                    <img
+                                                        src={chat.recipient.photo}
+                                                        alt=""
+                                                        className="w-full h-full rounded-full object-cover"
+                                                    />
+                                                ) : chat.isAnonymous ? (
+                                                    '🎭'
+                                                ) : (
+                                                    chat.recipient.name?.charAt(0) || '?'
+                                                )}
                                             </div>
                                             {chat.recipient.isOnline && (
                                                 <span className="absolute bottom-0 right-0 w-4 h-4 bg-green-500 border-2 border-gray-900 rounded-full" />
@@ -149,9 +329,7 @@ export default function ChatListPage() {
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center justify-between mb-1">
                                                 <div className="flex items-center gap-2">
-                                                    <h3 className="font-semibold text-white truncate">
-                                                        {chat.recipient.name}
-                                                    </h3>
+                                                    <h3 className="font-semibold text-white truncate">{chat.recipient.name}</h3>
                                                     {chat.recipient.isVerified && <span className="text-blue-400 text-sm">✓</span>}
                                                     {chat.isAnonymous && (
                                                         <span className="px-1.5 py-0.5 bg-purple-500/20 text-purple-300 rounded text-xs">

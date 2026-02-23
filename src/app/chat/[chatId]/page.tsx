@@ -1,19 +1,22 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { getSocket } from '@/lib/socket-client';
-
-interface Message {
-    id: string;
-    content: string;
-    senderId: string;
-    isAnonymous: boolean;
-    createdAt: string;
-    readAt: string | null;
-}
+import { onAuthStateChanged } from 'firebase/auth';
+import { getFirebaseAuth } from '@/lib/firebase';
+import {
+    acknowledgeMessages,
+    ensureChatDocument,
+    listenToMessages,
+    listenToPresence,
+    listenToTypingState,
+    sendChatMessage,
+    setTypingState,
+    startPresenceHeartbeat,
+    type ChatMessage,
+} from '@/lib/firestore-chat';
 
 interface ChatData {
     chatId: string;
@@ -26,60 +29,46 @@ interface ChatData {
         isOnline: boolean;
         isVerified: boolean;
     };
-    me: {
-        anonymousName: string;
-    };
-    messages: Message[];
-    hasMore: boolean;
 }
+
+type ReceiptStatus = 'sent' | 'delivered' | 'seen';
 
 export default function ChatPage() {
     const { data: session, status } = useSession();
     const params = useParams();
     const router = useRouter();
-    const chatId = params.chatId as string;
+
+    const paramValue = params.chatId;
+    const chatId = typeof paramValue === 'string' ? paramValue : '';
 
     const [chatData, setChatData] = useState<ChatData | null>(null);
-    const [messages, setMessages] = useState<Message[]>([]);
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [loading, setLoading] = useState(true);
     const [newMessage, setNewMessage] = useState('');
     const [sending, setSending] = useState(false);
     const [revealing, setRevealing] = useState(false);
     const [isRecipientTyping, setIsRecipientTyping] = useState(false);
+    const [recipientOnline, setRecipientOnline] = useState(false);
+    const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
+    const [isWindowActive, setIsWindowActive] = useState(true);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isTypingRef = useRef(false);
 
-    // Socket connection
+    const currentUserId = useMemo(
+        () => firebaseUid ?? session?.user?.id ?? null,
+        [firebaseUid, session?.user?.id]
+    );
+
     useEffect(() => {
-        if (status === 'authenticated' && chatId && session?.user?.id) {
-            const socket = getSocket();
-            socket.connect();
+        const firebaseAuth = getFirebaseAuth();
+        const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
+            setFirebaseUid(user?.uid ?? null);
+        });
 
-            socket.emit('join_room', chatId);
-
-            socket.on('new_message', (msg: Message) => {
-                setMessages(prev => {
-                    if (prev.find(m => m.id === msg.id)) return prev;
-                    return [...prev, msg];
-                });
-            });
-
-            socket.on('user_typing', (data: { userId: string, isTyping: boolean }) => {
-                if (data.userId !== session.user.id) {
-                    setIsRecipientTyping(data.isTyping);
-                }
-            });
-
-            return () => {
-                socket.off('new_message');
-                socket.off('user_typing');
-                socket.emit('leave_room', chatId);
-                // We don't disconnect globally here to keep the socket alive for other pages if needed
-                // socket.disconnect(); 
-            };
-        }
-    }, [status, chatId, session]);
+        return unsubscribe;
+    }, []);
 
     useEffect(() => {
         if (status === 'unauthenticated') {
@@ -88,78 +77,227 @@ export default function ChatPage() {
     }, [status, router]);
 
     useEffect(() => {
-        if (status === 'authenticated' && chatId) {
-            fetchChat();
+        if (status !== 'authenticated' || !chatId) {
+            return;
         }
-    }, [status, chatId]);
+
+        let cancelled = false;
+
+        const fetchChatMeta = async () => {
+            try {
+                setLoading(true);
+                const res = await fetch(`/api/chat/${chatId}`);
+
+                if (!res.ok) {
+                    if (res.status === 404 && !cancelled) {
+                        router.push('/chat');
+                    }
+                    return;
+                }
+
+                const data = (await res.json()) as ChatData;
+                if (cancelled) return;
+
+                setChatData(data);
+                setRecipientOnline(Boolean(data.recipient?.isOnline));
+
+            } catch (error) {
+                console.error('Failed to fetch chat metadata:', error);
+            } finally {
+                if (!cancelled) {
+                    setLoading(false);
+                }
+            }
+        };
+
+        void fetchChatMeta();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [status, chatId, router]);
 
     useEffect(() => {
-        scrollToBottom();
+        if (!chatId || !currentUserId || !chatData?.recipient?.id) {
+            return;
+        }
+
+        let unsubscribeMessages: (() => void) | null = null;
+        let unsubscribeTyping: (() => void) | null = null;
+        let unsubscribePresence: (() => void) | null = null;
+        let stopHeartbeat: (() => void) | null = null;
+
+        const setupRealtime = async () => {
+            try {
+                await ensureChatDocument(chatId, [currentUserId, chatData.recipient.id]);
+            } catch (error) {
+                console.error('Failed to ensure Firestore chat document:', error);
+            }
+
+            unsubscribeMessages = listenToMessages(
+                chatId,
+                (nextMessages) => {
+                    setMessages(nextMessages);
+                },
+                (error) => {
+                    console.error('Messages listener error:', error);
+                }
+            );
+
+            unsubscribeTyping = listenToTypingState(
+                chatId,
+                chatData.recipient.id,
+                (isTyping) => {
+                    setIsRecipientTyping(isTyping);
+                },
+                (error) => {
+                    console.error('Typing listener error:', error);
+                }
+            );
+
+            unsubscribePresence = listenToPresence(
+                chatData.recipient.id,
+                (isOnline) => {
+                    setRecipientOnline(isOnline);
+                },
+                (error) => {
+                    console.error('Presence listener error:', error);
+                }
+            );
+
+            stopHeartbeat = startPresenceHeartbeat(currentUserId);
+        };
+
+        void setupRealtime();
+
+        return () => {
+            unsubscribeMessages?.();
+            unsubscribeTyping?.();
+            unsubscribePresence?.();
+            stopHeartbeat?.();
+
+            if (typingTimeoutRef.current) {
+                clearTimeout(typingTimeoutRef.current);
+            }
+
+            if (isTypingRef.current) {
+                isTypingRef.current = false;
+                void setTypingState(chatId, currentUserId, false).catch((error) => {
+                    console.error('Failed to clear typing state:', error);
+                });
+            }
+        };
+    }, [chatId, currentUserId, chatData?.recipient?.id]);
+
+    useEffect(() => {
+        const refreshWindowState = () => {
+            setIsWindowActive(document.visibilityState === 'visible' && document.hasFocus());
+        };
+
+        refreshWindowState();
+        window.addEventListener('focus', refreshWindowState);
+        window.addEventListener('blur', refreshWindowState);
+        document.addEventListener('visibilitychange', refreshWindowState);
+
+        return () => {
+            window.removeEventListener('focus', refreshWindowState);
+            window.removeEventListener('blur', refreshWindowState);
+            document.removeEventListener('visibilitychange', refreshWindowState);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!chatId || !currentUserId || messages.length === 0) {
+            return;
+        }
+
+        const incomingMessages = messages.filter((message) => message.senderId !== currentUserId);
+        if (incomingMessages.length === 0) return;
+
+        const pendingDelivery = incomingMessages
+            .filter((message) => !message.deliveredTo.includes(currentUserId))
+            .map((message) => message.id);
+
+        const pendingSeen = isWindowActive
+            ? incomingMessages
+                  .filter((message) => !message.seenBy.includes(currentUserId))
+                  .map((message) => message.id)
+            : [];
+
+        const messageIdsToAck = [...new Set([...pendingDelivery, ...pendingSeen])];
+        if (messageIdsToAck.length === 0) return;
+
+        void acknowledgeMessages(chatId, currentUserId, messageIdsToAck, isWindowActive).catch((error) => {
+            console.error('Failed to update message receipts:', error);
+        });
+    }, [messages, chatId, currentUserId, isWindowActive]);
+
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    };
-
-    const fetchChat = async () => {
-        try {
-            setLoading(true);
-            const res = await fetch(`/api/chat/${chatId}`);
-            if (res.ok) {
-                const data = await res.json();
-                setChatData(data);
-                setMessages(data.messages || []);
-            } else if (res.status === 404) {
-                router.push('/chat');
-            }
-        } catch (error) {
-            console.error('Failed to fetch chat:', error);
-        } finally {
-            setLoading(false);
+    const updateTypingState = (isTyping: boolean) => {
+        if (!chatId || !currentUserId || isTypingRef.current === isTyping) {
+            return;
         }
+
+        isTypingRef.current = isTyping;
+        void setTypingState(chatId, currentUserId, isTyping).catch((error) => {
+            console.error('Typing state update failed:', error);
+        });
     };
 
-    const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
-        setNewMessage(e.target.value);
+    const handleTyping = (e: ChangeEvent<HTMLInputElement>) => {
+        const value = e.target.value;
+        setNewMessage(value);
 
-        const socket = getSocket();
-        socket.emit('typing', { roomId: chatId, userId: session?.user?.id, isTyping: true });
+        if (!value.trim()) {
+            if (typingTimeoutRef.current) {
+                clearTimeout(typingTimeoutRef.current);
+            }
+            updateTypingState(false);
+            return;
+        }
 
-        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        updateTypingState(true);
+
+        if (typingTimeoutRef.current) {
+            clearTimeout(typingTimeoutRef.current);
+        }
 
         typingTimeoutRef.current = setTimeout(() => {
-            socket.emit('typing', { roomId: chatId, userId: session?.user?.id, isTyping: false });
-        }, 2000);
+            updateTypingState(false);
+        }, 1500);
     };
 
-    const sendMessage = async (e: React.FormEvent) => {
+    const sendMessage = async (e: FormEvent) => {
         e.preventDefault();
-        if (!newMessage.trim() || sending) return;
+        if (!chatId || !currentUserId || !newMessage.trim() || sending) {
+            return;
+        }
 
-        const socket = getSocket();
         const content = newMessage.trim();
         setNewMessage('');
+        setSending(true);
 
-        socket.emit('send_message', {
-            roomId: chatId,
-            content,
-            senderId: session?.user?.id,
-            senderName: session?.user?.name,
-            isAnonymous: chatData?.isAnonymous
-        });
+        if (typingTimeoutRef.current) {
+            clearTimeout(typingTimeoutRef.current);
+        }
+        updateTypingState(false);
 
         try {
-            await fetch(`/api/chat/${chatId}/send`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content }),
-            });
+            await sendChatMessage(chatId, currentUserId, content);
         } catch (error) {
-            console.error('Failed to persist message:', error);
+            console.error('Failed to send message:', error);
+            setNewMessage(content);
+        } finally {
+            setSending(false);
         }
     };
 
     const requestReveal = async () => {
+        if (!chatId) return;
+
         setRevealing(true);
         try {
             const res = await fetch(`/api/chat/${chatId}/reveal`, {
@@ -184,8 +322,17 @@ export default function ChatPage() {
         }
     };
 
-    const formatTime = (dateString: string) => {
-        return new Date(dateString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const formatTime = (value: Date | null) => {
+        if (!value) return '';
+        return value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    };
+
+    const getMessageReceiptStatus = (message: ChatMessage): ReceiptStatus => {
+        const recipientId = chatData?.recipient.id;
+        if (!recipientId) return 'sent';
+        if (message.seenBy.includes(recipientId)) return 'seen';
+        if (message.deliveredTo.includes(recipientId)) return 'delivered';
+        return 'sent';
     };
 
     if (status === 'loading' || loading) {
@@ -204,7 +351,9 @@ export default function ChatPage() {
             <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900/20 to-gray-900 flex items-center justify-center">
                 <div className="text-center">
                     <p className="text-gray-400">Chat not found</p>
-                    <Link href="/chat" className="text-purple-400 mt-2 block">← Back to chats</Link>
+                    <Link href="/chat" className="text-purple-400 mt-2 block">
+                        ← Back to chats
+                    </Link>
                 </div>
             </div>
         );
@@ -221,21 +370,27 @@ export default function ChatPage() {
                         <div className="w-10 h-10 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 flex items-center justify-center">
                             {chatData.recipient.photo ? (
                                 <img src={chatData.recipient.photo} alt="" className="w-full h-full rounded-full object-cover" />
-                            ) : chatData.isAnonymous ? '🎭' : chatData.recipient.name?.charAt(0).toUpperCase()}
+                            ) : chatData.isAnonymous ? (
+                                '🎭'
+                            ) : (
+                                chatData.recipient.name?.charAt(0).toUpperCase()
+                            )}
                         </div>
-                        {chatData.recipient.isOnline && (
+                        {recipientOnline && (
                             <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-gray-900 rounded-full" />
                         )}
                     </div>
                     <div className="flex-1">
                         <div className="flex items-center gap-2">
                             <h1 className="font-semibold text-white">
-                                {chatData.isAnonymous ? `Stranger #${chatId.split('-').find(id => id !== session?.user?.id)?.slice(-4).toUpperCase()}` : chatData.recipient.name}
+                                {chatData.isAnonymous
+                                    ? `Stranger #${chatData.recipient.id?.slice(-4).toUpperCase()}`
+                                    : chatData.recipient.name}
                             </h1>
                             {chatData.recipient.isVerified && <span className="text-blue-400 text-sm">✓</span>}
                         </div>
                         <p className="text-xs text-gray-400">
-                            {chatData.recipient.isOnline ? 'Online' : 'Offline'}
+                            {recipientOnline ? 'Online' : 'Offline'}
                             {chatData.isAnonymous && ` • Reveal Level ${chatData.revealLevel}/5`}
                         </p>
                     </div>
@@ -261,25 +416,40 @@ export default function ChatPage() {
                                 style={{ width: `${(chatData.revealLevel / 5) * 100}%` }}
                             />
                         </div>
-                        <p className="text-xs text-gray-500">
-                            Keep chatting to unlock more about each other!
-                        </p>
+                        <p className="text-xs text-gray-500">Keep chatting to unlock more about each other!</p>
                     </div>
                 )}
 
                 <div className="space-y-3">
-                    {messages.map((msg) => {
-                        const isOwn = msg.senderId === session?.user?.id;
+                    {messages.map((message) => {
+                        const isOwn = message.senderId === currentUserId;
+                        const receiptStatus = isOwn ? getMessageReceiptStatus(message) : null;
+
                         return (
-                            <div key={msg.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[75%] ${isOwn
-                                    ? 'bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl rounded-br-md'
-                                    : 'glass rounded-2xl rounded-bl-md'
-                                    } px-4 py-2`}>
-                                    <p className="text-white">{msg.content}</p>
+                            <div key={message.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
+                                <div
+                                    className={`max-w-[75%] ${
+                                        isOwn
+                                            ? 'bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl rounded-br-md'
+                                            : 'glass rounded-2xl rounded-bl-md'
+                                    } px-4 py-2`}
+                                >
+                                    <p className="text-white whitespace-pre-wrap break-words">{message.text}</p>
                                     <div className={`flex items-center gap-1 mt-1 ${isOwn ? 'justify-end' : ''}`}>
-                                        <span className="text-xs text-gray-400">{formatTime(msg.createdAt)}</span>
-                                        {isOwn && msg.readAt && <span className="text-xs text-blue-400">✓✓</span>}
+                                        <span className="text-xs text-gray-400">{formatTime(message.createdAt)}</span>
+                                        {isOwn && receiptStatus && (
+                                            <span
+                                                className={`text-xs ${
+                                                    receiptStatus === 'seen'
+                                                        ? 'text-blue-400'
+                                                        : receiptStatus === 'delivered'
+                                                          ? 'text-gray-300'
+                                                          : 'text-gray-500'
+                                                }`}
+                                            >
+                                                {receiptStatus === 'sent' ? '✓' : '✓✓'}
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -294,8 +464,14 @@ export default function ChatPage() {
                     <div className="flex gap-1 items-center mb-2 px-2 animate-in fade-in slide-in-from-bottom-1">
                         <div className="flex gap-1">
                             <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce"></span>
-                            <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
-                            <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+                            <span
+                                className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce"
+                                style={{ animationDelay: '0.2s' }}
+                            ></span>
+                            <span
+                                className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce"
+                                style={{ animationDelay: '0.4s' }}
+                            ></span>
                         </div>
                         <span className="text-xs text-gray-500">
                             {chatData.isAnonymous ? 'Stranger' : chatData.recipient.name} is typing...
