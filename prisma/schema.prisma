@@ -1,0 +1,242 @@
+// This is your Prisma schema file for GCET Campus Social Platform
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  phone             String   @unique
+  passwordHash      String
+  
+  // Verification
+  campus            Campus
+  isEmailVerified   Boolean  @default(false)
+  isPhoneVerified   Boolean  @default(false)
+  isPhotoVerified   Boolean  @default(false) // Blue tick
+  verificationToken String?
+  verificationSelfie String? // Gesture selfie for verification
+  
+  // Core Profile (Shared across modes)
+  name              String
+  age               Int
+  gender            Gender
+  department        String?
+  year              Int?
+  bio               String?
+  photos            String[] // array of photo URLs
+  
+  // Dating Mode Specific
+  relationshipGoals String?  // e.g., "Serious", "Casual", "Friendship First"
+  personalityType   String?  // e.g., "INTJ", "Extrovert", etc.
+  
+  // Friend Mode Specific
+  skills            String[] // e.g., ["Python", "Guitar", "Photography"]
+  clubs             String[] // e.g., ["Coding Club", "Music Society"]
+  studyInterests    String[] // e.g., ["AI/ML", "Web Dev", "Data Science"]
+  
+  // Shared Interests/Tags
+  interests         String[] // General interests used in both modes
+  
+  // Settings
+  seekingGender     Gender[]
+  ageRangeMin       Int      @default(18)
+  ageRangeMax       Int      @default(30)
+  currentMode       Mode     @default(FRIEND)
+  allowCrossCampus  Boolean  @default(false) // Toggle for cross-campus matching
+  onlyVerifiedUsers Boolean  @default(false) // Only match with photo-verified users
+  
+  // Moderation
+  reportCount       Int      @default(0)
+  isSuspended       Boolean  @default(false)
+  suspendedUntil    DateTime?
+  
+  // Metadata
+  createdAt         DateTime @default(now())
+  lastActive        DateTime @default(now())
+  
+  // Relations
+  sentMatches       Match[]  @relation("UserMatches")
+  receivedMatches   Match[]  @relation("MatchedUserMatches")
+  chats             ChatParticipant[]
+  messages          Message[]
+  groups            GroupMember[]
+  createdGroups     Group[]  @relation("GroupCreator")
+  reports           Report[] @relation("ReportedUser")
+  sentReports       Report[] @relation("Reporter")
+}
+
+enum Campus {
+  GCET
+  GU
+  GCOP
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  NON_BINARY
+  PREFER_NOT_TO_SAY
+}
+
+enum Mode {
+  DATING
+  FRIEND
+}
+
+model Match {
+  id              String   @id @default(cuid())
+  userId          String
+  matchedUserId   String
+  mode            Mode     // dating or friend mode
+  
+  // Blind dating mechanics
+  isAnonymous     Boolean  @default(true)
+  revealLevel     Int      @default(0) // 0-5 progressive levels
+  
+  status          MatchStatus @default(PENDING)
+  chatId          String?  @unique
+  
+  createdAt       DateTime @default(now())
+  
+  user            User     @relation("UserMatches", fields: [userId], references: [id])
+  matchedUser     User     @relation("MatchedUserMatches", fields: [matchedUserId], references: [id])
+  chat            Chat?    @relation(fields: [chatId], references: [id])
+}
+
+enum MatchStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  BLOCKED
+}
+
+model Chat {
+  id              String   @id @default(cuid())
+  isAnonymous     Boolean  @default(true)
+  revealLevel     Int      @default(0)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  participants    ChatParticipant[]
+  messages        Message[]
+  match           Match?
+}
+
+model ChatParticipant {
+  id              String   @id @default(cuid())
+  chatId          String
+  userId          String
+  anonymousName   String   // e.g., "Stranger A", "Mystery Person"
+  
+  chat            Chat     @relation(fields: [chatId], references: [id])
+  user            User     @relation(fields: [userId], references: [id])
+  
+  @@unique([chatId, userId])
+}
+
+model Message {
+  id              String   @id @default(cuid())
+  chatId          String
+  senderId        String
+  content         String
+  isAnonymous     Boolean  @default(true)
+  
+  createdAt       DateTime @default(now())
+  readAt          DateTime?
+  
+  chat            Chat     @relation(fields: [chatId], references: [id])
+  sender          User     @relation(fields: [senderId], references: [id])
+}
+
+model Group {
+  id              String   @id @default(cuid())
+  name            String
+  description     String
+  type            GroupType
+  campus          Campus?  // Null for cross-campus groups
+  campusScope     GroupScope @default(CAMPUS_SPECIFIC)
+  maxMembers      Int      @default(50)
+  
+  creatorId       String
+  isPublic        Boolean  @default(true)
+  
+  createdAt       DateTime @default(now())
+  
+  creator         User     @relation("GroupCreator", fields: [creatorId], references: [id])
+  members         GroupMember[]
+}
+
+enum GroupScope {
+  CAMPUS_SPECIFIC  // Physical meetups: "C-Block Canteen", "GCET Study Group"
+  CROSS_CAMPUS     // Shared interests: "Galgotias Coding Club", "Gaming Hub"
+}
+
+enum GroupType {
+  STUDY
+  EVENT
+  SOCIAL
+  SPORTS
+  OTHER
+}
+
+model GroupMember {
+  id              String   @id @default(cuid())
+  groupId         String
+  userId          String
+  role            GroupRole @default(MEMBER)
+  
+  joinedAt        DateTime @default(now())
+  
+  group           Group    @relation(fields: [groupId], references: [id])
+  user            User     @relation(fields: [userId], references: [id])
+  
+  @@unique([groupId, userId])
+}
+
+enum GroupRole {
+  ADMIN
+  MODERATOR
+  MEMBER
+}
+
+model Report {
+  id              String   @id @default(cuid())
+  reporterId      String
+  reportedUserId  String
+  reason          ReportReason
+  description     String?
+  chatId          String?  // If report is about a specific chat
+  
+  status          ReportStatus @default(PENDING)
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  
+  createdAt       DateTime @default(now())
+  
+  reporter        User     @relation("Reporter", fields: [reporterId], references: [id])
+  reportedUser    User     @relation("ReportedUser", fields: [reportedUserId], references: [id])
+}
+
+enum ReportReason {
+  HARASSMENT
+  INAPPROPRIATE_CONTENT
+  SPAM
+  FAKE_PROFILE
+  UNDERAGE
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  ACTION_TAKEN
+  DISMISSED
+}
